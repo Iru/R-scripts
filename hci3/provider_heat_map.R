@@ -2,7 +2,7 @@ require(RPostgreSQL)
 require(data.table)
 require(ggplot2)
 
-if (!is.null(run.once)) {
+if (run.once) {
   # connect to database
   con <- dbConnect(dbDriver("PostgreSQL"), dbname="analytics")
   
@@ -50,182 +50,285 @@ if (!is.null(run.once)) {
                        , factor(group_name)
                        , NULL
                   )]
-  run.once<-NULL
+  run.once<-FALSE
 }
 setkey(code.table.dt, type_id)
-dx.code.dt<-code.table.dt["DX"]
-rx.code.dt<-code.table.dt["RX"]
-px.code.dt<-code.table.dt[type_id!="DX" & type_id!="RX"]
+dx.code.dt <- code.table.dt["DX"]
+rx.code.dt <- code.table.dt["RX"]
+px.code.dt <- code.table.dt[type_id!="DX" & type_id!="RX"]
 
 
 # First build facility & support only tables
-facility.dt<-claim.dt[!is.na(fac_npi),
-                      .(type
-                        , doc_npi
-                        , pcp_npi
-                        , total.fac=sum(tot_amt)
-                        , covrd.fac=sum(cvrd_amt)                                 
-                      ), by="episode,fac_npi"]
+facility.dt <-
+  unique(
+    claim.dt[!is.na(fac_npi),
+             .(type
+               , doc_npi
+               , pcp_npi
+               , total.fac=sum(tot_amt)
+             ),
+             keyby=.(episode, fac_npi)],
+  )
 
-support.dt<-claim.dt[!is.na(sup_npi),
-                     .(type
-                       , doc_npi
-                       , pcp_npi
-                       , total.sup=sum(tot_amt)
-                       , covrd.sup=sum(cvrd_amt)                                 
-                     ), by="episode,sup_npi"]
+support.dt <-
+  unique(
+    claim.dt[!is.na(sup_npi),
+             .(type
+               , doc_npi
+               , pcp_npi
+               , total.sup=sum(tot_amt)
+             ),
+             keyby=.(episode, sup_npi)],
+  )
+
 
 # create episode level view - will need more of these that show dx/px groups later
-episode.dt<-unique(claim.dt[,
-                            .(type
-                              , doc_npi
-                              , pcp_npi
-                              , total.all=sum(tot_amt)
-                              , covrd.all=sum(cvrd_amt)                                 
-                            ), by=episode])
+episode.dt <-
+  unique(
+    claim.dt[,
+             .(type
+               , doc_npi
+               , pcp_npi
+               , total.all=sum(tot_amt)
+             ),
+             keyby=.(episode)]
+    )
 
-episode.dt<-merge(x=episode.dt
-                  , y=facility.dt[,
-                               .(total.fac=sum(total.fac)
-                                 , covrd.fac=sum(covrd.fac)
-                               ), by=episode]
-                  , all.x=TRUE)
-episode.dt<-merge(x=episode.dt
-                  , y=support.dt[,
-                               .(total.sup=sum(total.sup)
-                                 , covrd.sup=sum(covrd.sup)
-                               ), by=episode]
-                  , all.x=TRUE)
+# add the per episode facility total
+episode.dt<-facility.dt[, .(total.fac=sum(total.fac)), by=.(episode)][episode.dt]
 
-means.dt<-rbindlist(list(
-  episode.dt[,
-             .(type=NA  
-               , total.all=mean(total.all, na.rm=TRUE)
-               , covrd.all=mean(covrd.all, na.rm=TRUE)
-               , total.fac=mean(total.fac, na.rm=TRUE)
-               , covrd.fac=mean(covrd.fac, na.rm=TRUE)
-               , total.sup=mean(total.sup, na.rm=TRUE)
-               , covrd.sup=mean(covrd.sup, na.rm=TRUE)
-               , cutoff=quantile(total.all, probs=0.8, type=8)
-             )],
-  episode.dt[,
-             .(total.all=mean(total.all, na.rm=TRUE)
-               , covrd.all=mean(covrd.all, na.rm=TRUE)
-               , total.fac=mean(total.fac, na.rm=TRUE)
-               , covrd.fac=mean(covrd.fac, na.rm=TRUE)
-               , total.sup=mean(total.sup, na.rm=TRUE)
-               , covrd.sup=mean(covrd.sup, na.rm=TRUE)
-               , cutoff=quantile(total.all, probs=0.8, type=8)
-             ), by=type]
-))
+# add the per episode support total
+episode.dt<-support.dt[, .(total.sup=sum(total.sup)), by=.(episode)][episode.dt]
 
-quantiles.dt<--rbindlist(list(
-    episode.dt[,
-               .(type=NA  
-                 , total.all=mean(total.all, na.rm=TRUE)
-                 , covrd.all=mean(covrd.all, na.rm=TRUE)
-                 , total.fac=mean(total.fac, na.rm=TRUE)
-                 , covrd.fac=mean(covrd.fac, na.rm=TRUE)
-                 , total.sup=mean(total.sup, na.rm=TRUE)
-                 , covrd.sup=mean(covrd.sup, na.rm=TRUE)
-               )],
-    episode.dt[,
-               .(total.all=mean(total.all, na.rm=TRUE)
-                 , covrd.all=mean(covrd.all, na.rm=TRUE)
-                 , total.fac=mean(total.fac, na.rm=TRUE)
-                 , covrd.fac=mean(covrd.fac, na.rm=TRUE)
-                 , total.sup=mean(total.sup, na.rm=TRUE)
-                 , covrd.sup=mean(covrd.sup, na.rm=TRUE)
-               ), by=type]
-  ))
-
-  #
-# Distributions of ALL costs
-#
-
-# pcp distribution- ignore any episodes with missing npis
-setkey(episode.dt,pcp_npi)
-pcp.dt<-episode.dt[!is.na(pcp_npi),
-                   .(num_episode=length(episode)
-                     , avg_total=mean(total.all)
-                     , avg_covrd=mean(covrd.all)
-                     , tot_total=sum(total.all)
-                     , tot_covrd=sum(covrd.all)
-                     , rel_total=mean(total.all)/means.dt$total.all
-                     , rel_covrd=mean(covrd.all)/means.dt$covrd.all
-                   ), by=pcp_npi]
-
-# attributed distribution- ignore any episodes with missing npis
-setkey(episode.dt,doc_npi)
-doc.dt<-episode.dt[!is.na(doc_npi),
-                    list(num_episode=length(episode)
-                         , avg_total=mean(total.all)
-                         , avg_covrd=mean(covrd.all)
-                         , tot_total=sum(total.all)
-                         , tot_covrd=sum(covrd.all)
-                         , rel_total=mean(total.all)/means.dt$total.all
-                         , rel_covrd=mean(covrd.all)/means.dt$covrd.all
-                    ), by=doc_npi]
-
-# pcp vs attributed distribution - ignore any episodes with missing npis
-setkey(episode.dt,pcp_npi,doc_npi)
-pcp.doc.dt<-episode.dt[!is.na(pcp_npi) & !is.na(doc_npi),
-                        list(num_episode=length(episode)
-                             , avg_total=mean(total.all)
-                             , avg_covrd=mean(covrd.all)
-                             , tot_total=sum(total.all)
-                             , tot_covrd=sum(covrd.all)
-                             , rel_total=mean(total.all)/means.dt$total.all
-                             , rel_covrd=mean(covrd.all)/means.dt$covrd.all
-                        ), by="pcp_npi,doc_npi"]
+# Add the univeral and per condition means to each episode.  Also add the current cut-off value (80th percentile)
+episode.dt[,c("mean.all"
+              , "mean.fac"
+              , "mean.sup"
+              , "cutoff.all") :=
+             list(mean(total.all, na.rm=TRUE)
+                  , mean(total.fac, na.rm=TRUE)
+                  , mean(total.sup, na.rm=TRUE)
+                  , quantile(total.all, probs=0.8, type=8)
+             )]
+episode.dt[,c("type.mean.all"
+              , "type.mean.fac"
+              , "type.mean.sup"
+              , "type.cutoff.all") :=
+             list(mean(total.all, na.rm=TRUE)
+                  , mean(total.fac, na.rm=TRUE)
+                  , mean(total.sup, na.rm=TRUE)
+                  , quantile(total.all, probs=0.8, type=8)
+             ),
+           by=.(type)]
+print("built episode.dt")
 
 #
-# Per episode type distributions
+# Create list of target entries based on claims above cutoff
 #
+pcp.list.dt <-
+  setkey(
+    unique(
+      episode.dt[!is.na(pcp_npi) & total.all>=cutoff.all,
+                 .(pcp_npi)]
+    ),
+    pcp_npi)
 
-setkey(episode.dt,type)
-epi.cond.dt<-episode.dt[,
-                        .(num_episode=length(episode)
-                          , avg_total=mean(total.all)
-                          , avg_covrd=mean(covrd.all)
-                          , tot_total=sum(total.all)
-                          , tot_covrd=sum(covrd.all)
-                          , rel_total=mean(total.all)/means.dt$total.all
-                          , rel_covrd=mean(covrd.all)/means.dt$covrd.all
-                        ), by=type]
-epi.cond.dt<-episode.dt[epi.cond.dt]
+doc.list.dt <-
+  setkey(
+    unique(
+      episode.dt[!is.na(doc_npi) & total.all>=cutoff.all,
+                 .(doc_npi)]
+    ),
+    doc_npi)
 
-pcp.cond.dt<-setkey(epi.cond.dt[!is.na(pcp_npi),
-                                .(num_episode=length(episode)
-                                  , avg_total=mean(total.all)
-                                  , avg_covrd=mean(covrd.all)
-                                  , tot_total=sum(total.all)
-                                  , tot_covrd=sum(covrd.all)
-                                  , rel_total=mean(total.all)/avg_total
-                                  , rel_covrd=mean(covrd.all)/avg_covrd
-                                ), by="type,pcp_npi"],
-                    type,pcp_npi)
-doc.cond.dt<-setkey(epi.cond.dt[!is.na(doc_npi),
-                                .(num_episode=length(episode)
-                                  , avg_total=mean(total.all)
-                                  , avg_covrd=mean(covrd.all)
-                                  , tot_total=sum(total.all)
-                                  , tot_covrd=sum(covrd.all)
-                                  , rel_total=mean(total.all)/avg_total
-                                  , rel_covrd=mean(covrd.all)/avg_covrd
-                                ), by="type,doc_npi"],
-                    type,doc_npi)
+pcp.doc.list.dt <-
+  setkey(
+    unique(
+      episode.dt[!is.na(pcp_npi) & !is.na(doc_npi) & total.all>=cutoff.all,
+                 .(pcp_npi, doc_npi)]
+    ),
+    pcp_npi, doc_npi)
 
-pcp.doc.cond.dt<-setkey(epi.cond.dt[!is.na(pcp_npi) & !is.na(doc_npi),
-                                    .(num_episode=length(episode)
-                                      , avg_total=mean(total.all)
-                                      , avg_covrd=mean(covrd.all)
-                                      , tot_total=sum(total.all)
-                                      , tot_covrd=sum(covrd.all)
-                                      , rel_total=mean(total.all)/avg_total
-                                      , rel_covrd=mean(covrd.all)/avg_covrd
-                                    ), by="type,pcp_npi,doc_npi"],
-                        type,pcp_npi,doc_npi)
+# fac.list.dt <-
+#   setkey(
+#     unique(
+#       episode.dt[!is.na(fac_npi) & total.all>=cutoff.all,
+#                  .(fac_npi)]
+#     ),
+#     fac_npi)
+# 
+# fac.pcp.list.dt <-
+#   setkey(
+#     unique(
+#       episode.dt[!is.na(fac_npi) & !is.na(pcp_npi) & total.all>=cutoff.all,
+#                  .(fac_npi, pcp_npi)]
+#     ),
+#     fac_npi, pcp_npi)
+# 
+# fac.doc.list.dt <-
+#   setkey(
+#     unique(
+#       episode.dt[!is.na(fac_npi) & !is.na(doc_npi) & total.all>=cutoff.all,
+#                  .(fac_npi, doc_npi)]
+#     ),
+#     fac_npi, doc_npi)
+# 
+# sup.list.dt <-
+#   setkey(
+#     unique(
+#       episode.dt[!is.na(sup_npi) & total.all>=cutoff.all,
+#                  .(sup_npi)]
+#     ),
+#     sup_npi)
+# 
+# sup.pcp.list.dt <-
+#   setkey(
+#     unique(
+#       episode.dt[!is.na(sup_npi) & !is.na(pcp_npi) & total.all>=cutoff.all,
+#                  .(sup_npi, pcp_npi)]
+#     ),
+#     sup_npi, pcp_npi)
+# 
+# sup.doc.list.dt <-
+#   setkey(
+#     unique(
+#       episode.dt[!is.na(sup_npi) & !is.na(doc_npi) & total.all>=cutoff.all,
+#                  .(sup_npi, doc_npi)]
+#     ),
+#     sup_npi, doc_npi)
+
+
+print("built *.list.dt")
+
+#
+# PCP only distribution, both overall and per episode type
+#
+setkey(episode.dt, pcp_npi)
+pcp.dt <-
+  unique(
+    episode.dt[
+      pcp.list.dt,
+      .(episodes=.N
+        , mean.all=mean(total.all)
+        , total.all=sum(total.all)
+        , relative.all=mean(total.all)/mean.all
+        , mean.fac=mean(total.fac)
+        , total.fac=sum(total.fac)
+        , relative.fac=mean(total.fac)/mean.fac
+        , mean.sup=mean(total.sup)
+        , total.sup=sum(total.sup)
+        , relative.sup=mean(total.sup)/mean.sup
+      ),
+      keyby=.(pcp_npi)]
+  )
+
+pcp.type.dt <-
+  unique(
+    episode.dt[
+      pcp.list.dt,
+      .(episodes=.N
+        , mean.all=mean(total.all)
+        , total.all=sum(total.all)
+        , relative.all=mean(total.all)/type.mean.all
+        , mean.fac=mean(total.fac)
+        , total.fac=sum(total.fac)
+        , relative.fac=mean(total.fac)/type.mean.fac
+        , mean.sup=mean(total.sup)
+        , total.sup=sum(total.sup)
+        , relative.sup=mean(total.sup)/type.mean.sup
+      ),
+      keyby=.(pcp_npi, type)]
+  )
+pcp.type.dt[pcp.dt, pcp.relative.all := i.relative.all]
+
+print("built PCP distributions")
+
+
+#
+# Attributed physician only distribution, both overall and per episode type
+#
+setkey(episode.dt, doc_npi)
+doc.dt <-
+  unique(
+    episode.dt[
+      doc.list.dt,
+      .(episodes=.N
+        , mean.all=mean(total.all)
+        , total.all=sum(total.all)
+        , relative.all=mean(total.all)/mean.all
+        , mean.fac=mean(total.fac)
+        , total.fac=sum(total.fac)
+        , relative.fac=mean(total.fac)/mean.fac
+        , mean.sup=mean(total.sup)
+        , total.sup=sum(total.sup)
+        , relative.sup=mean(total.sup)/mean.sup
+      ), 
+      keyby=.(doc_npi)]
+  )
+
+doc.type.dt <-
+  unique(
+    episode.dt[
+      doc.list.dt,
+      .(episodes=.N
+        , mean.all=mean(total.all)
+        , total.all=sum(total.all)
+        , relative.all=mean(total.all)/type.mean.all
+        , mean.fac=mean(total.fac)
+        , total.fac=sum(total.fac)
+        , relative.fac=mean(total.fac)/type.mean.fac
+        , mean.sup=mean(total.sup)
+        , total.sup=sum(total.sup)
+        , relative.sup=mean(total.sup)/type.mean.sup
+      ), 
+      keyby=.(doc_npi, type)]
+  )
+doc.type.dt[doc.dt, doc.relative.all := i.relative.all]
+
+print("built Attributed Physician distributions")
+
+#
+# PCP vs Attributed physician distribution, both overall and per episode type
+#
+setkey(episode.dt, pcp_npi, doc_npi)
+pcp.doc.dt <-
+  unique(
+    episode.dt[
+      pcp.doc.list.dt,
+      .(episodes=.N
+        , mean.all=mean(total.all)
+        , total.all=sum(total.all)
+        , relative.all=mean(total.all)/mean.all
+        , mean.fac=mean(total.fac)
+        , total.fac=sum(total.fac)
+        , relative.fac=mean(total.fac)/mean.fac
+        , mean.sup=mean(total.sup)
+        , total.sup=sum(total.sup)
+        , relative.sup=mean(total.sup)/mean.sup
+      ),
+      keyby=.(pcp_npi, doc_npi)]
+  )
+
+pcp.doc.type.dt <-
+  unique(
+    episode.dt[
+      pcp.doc.list.dt,
+      .(episodes=.N
+        , mean.all=mean(total.all)
+        , total.all=sum(total.all)
+        , relative.all=mean(total.all)/type.mean.all
+        , mean.fac=mean(total.fac)
+        , total.fac=sum(total.fac)
+        , relative.fac=mean(total.fac)/type.mean.fac
+        , mean.sup=mean(total.sup)
+        , total.sup=sum(total.sup)
+        , relative.sup=mean(total.sup)/type.mean.sup
+      ),
+      keyby=.(pcp_npi, doc_npi, type)]
+  )
+pcp.doc.type.dt[pcp.doc.dt, pcp.doc.relative.all := i.relative.all]
+
+print("built PCP vs Attributed Physician distributions")
 
 
 if (do.extra) {
@@ -235,109 +338,56 @@ if (do.extra) {
 
 # facility distribution
 setkey(facility.dt,fac_npi)
-fac.dt<-facility.dt[,
-                    .(num_episode=length(episode)
-                      , avg_total=mean(fac_total)
-                      , avg_covrd=mean(fac_covrd)
-                      , tot_total=sum(fac_total)
-                      , tot_covrd=sum(fac_covrd)
-                      , rel_total=mean(fac_total)/means.dt$total.fac
-                      , rel_covrd=mean(fac_covrd)/means.dt$covrd.fac
-                    ), by=fac_npi]
+fac.dt <-
+  facility.dt[fac.list.dt,
+              .(episodes=.N
+                , mean.fac=mean(total.fac)
+                , total.fac=sum(total.fac)
+                , relative.fac=mean(total.fac)/mean.fac
+              ), 
+              keyby=.(fac_npi)]
+
+fac.type.dt <-
+  facility.dt[fac.list.dt,
+              .(episodes=.N
+                , mean.fac=mean(total.fac)
+                , total.fac=sum(total.fac)
+                , relative.fac=mean(total.fac)/mean.fac
+              ), 
+              keyby=.(fac_npi, type)]
 
 # pcp vs facility distribution - ignore any episodes with missing pcp npis
-setkey(facility.dt,pcp_npi,fac_npi)
-pcp.fac.dt<-facility.dt[!is.na(pcp_npi),
-                        list(num_episode=length(episode)
-                             , avg_total=mean(fac_total)
-                             , avg_covrd=mean(fac_covrd)
-                             , tot_total=sum(fac_total)
-                             , tot_covrd=sum(fac_covrd)
-                             , rel_total=mean(fac_total)/means.dt$total.fac
-                             , rel_covrd=mean(fac_covrd)/means.dt$covrd.fac
-                        ), by="pcp_npi,fac_npi"]
+pcp.fac.dt<-facility.dt[fac.pcp.list,
+                        .(episodes=.N
+                          , mean.fac=mean(total.fac)
+                          , total.fac=sum(total.fac)
+                          , relative.fac=mean(total.fac)/mean.fac
+                        ), 
+                        keyby=.(pcp_npi, fac_npi)]
+
+pcp.fac.type.dt<-facility.dt[fac.pcp.list,
+                        .(episodes=.N
+                          , mean.fac=mean(total.fac)
+                          , total.fac=sum(total.fac)
+                          , relative.fac=mean(total.fac)/mean.fac
+                        ), 
+                        keyby=.(pcp_npi, fac_npi, type)]
 
 # attributed vs facility distribution - ignore any episodes with missing doc npis
-setkey(facility.dt,doc_npi,fac_npi)
-doc.fac.dt<-facility.dt[!is.na(doc_npi),
-                       list(num_episode=length(episode)
-                            , avg_total=mean(fac_total)
-                            , avg_covrd=mean(fac_covrd)
-                            , tot_total=sum(fac_total)
-                            , tot_covrd=sum(fac_covrd)
-                            , rel_total=mean(fac_total)/means.dt$total.fac
-                            , rel_covrd=mean(fac_covrd)/means.dt$covrd.fac
-                       ), by="doc_npi,fac_npi"]
+doc.fac.dt<-facility.dt[fac.doc.list.dt,
+                        .(episodes=.N
+                          , mean.fac=mean(total.fac)
+                          , total.fac=sum(total.fac)
+                          , relative.fac=mean(total.fac)/mean.fac
+                        ),
+                        keyby=.(doc_npi, fac_npi)]
 
-#
-#
-#
-fac.cond.dt<-setkey(epi.cond.dt[!is.na(fac_npi),
-                                .(num_episode=length(episode)
-                                     , avg_total=mean(total)
-                                     , avg_covrd=mean(covrd)
-                                     , rel_total=mean(total)/avg_total
-                                     , rel_covrd=mean(covrd)/avg_covrd
-                                ), by="type,fac_npi"],
-                    type,fac_npi)
-
-pcp.fac.cond.dt<-setkey(epi.cond.dt[!is.na(pcp_npi) & !is.na(doc_npi),
-                                     list(num_episode=length(episode)
-                                          , avg_total=mean(total)
-                                          , avg_covrd=mean(covrd)
-                                          , rel_total=mean(total)/avg_total
-                                          , rel_covrd=mean(covrd)/avg_covrd
-                                     ), by="type,pcp_npi,fac_npi"],
-                         type,pcp_npi,fac_npi)
-doc.fac.cond.dt<-setkey(epi.cond.dt[!is.na(pcp_npi) & !is.na(doc_npi),
-                                    list(num_episode=length(episode)
-                                         , avg_total=mean(total)
-                                         , avg_covrd=mean(covrd)
-                                         , rel_total=mean(total)/avg_total
-                                         , rel_covrd=mean(covrd)/avg_covrd
-                                    ), by="type,pcp_npi,fac_npi"],
-                        type,pcp_npi,fac_npi)
+doc.fac.type.dt<-facility.dt[fac.doc.list.dt,
+                        .(episodes=.N
+                          , mean.fac=mean(total.fac)
+                          , total.fac=sum(total.fac)
+                          , relative.fac=mean(total.fac)/mean.fac
+                        ),
+                        keyby=.(doc_npi, fac_npi, type)]
 }
-
-episode.g <- ggplot(data = episode.dt) + theme_minimal()
-episode.g + geom_density(aes(x=total.all)) + scale_x_log10() +
-  #facet_wrap(~type) +
-  labs(x="Episode Cost (log10)", y="Density")
-
-                                                                                                                                                                                                
-pcp.g <- ggplot(data=pcp.dt) + theme_minimal() + theme(axis.text.x=element_text(angle=-90))
-pcp.g + geom_point(aes(x=reorder(pcp_npi, -rel_total), y=rel_total, colour=rel_total)) +
-  scale_colour_gradient2(guide="colorbar", low="green", mid="grey50", high="red", midpoint = 1) +
-  labs(x="PCP", y="Relative cost / Episode")
-
-pcp.cond.g <- ggplot(data=pcp.cond.dt) + theme_minimal() + theme(axis.text.x=element_text(angle=-90))
-pcp.cond.g + geom_point(aes(x=reorder(pcp_npi, -rel_total), y=rel_total, colour=rel_total)) +
-  scale_colour_gradient2(guide="colorbar", midpoint = 0.75) + # low="green", mid="grey50", high="red", midpoint = 1) +
-  labs(x="PCP", y="Relative cost / Episode") +
-  facet_wrap(~type)
-
-
-doc.g <- ggplot(data=doc.dt) + theme_minimal() + theme(axis.text.x=element_text(angle=-90))
-doc.g + geom_bar(aes(x=reorder(doc_npi, -rel_total), y=rel_total), stat="identity") +
-  labs(x="Attributed Physician", y="Avg. Episode $")
-
-fac.g <- ggplot(data=fac.dt) + theme_minimal() + theme(axis.text.x=element_text(angle=-90))
-fac.g + geom_bar(aes(x=reorder(fac_npi, -avg_total), y=avg_total), stat="identity") +
-  labs(x="Facility", y="Avg. Episode $")
-
-pcp.doc.g <- ggplot(data=pcp.doc.dt) + theme_minimal() + theme(axis.text.x=element_text(angle=-90))
-pcp.doc.g + geom_tile(aes(y=doc_npi, x=pcp_npi, fill=rel_total)) +
-  scale_fill_gradient2(low="green", mid="white", high="red", midpoint = 1) +
-  labs(x=NULL, y=NULL)
-
-pcp.doc.cond.g <- lapply(unique(episode.dt$type), function(x) {ggplot(data=pcp.doc.cond.dt[J(x)])})
-
-pcp.doc.cond.g[[1]] +
-  theme_minimal() +
-  theme(axis.text.x=element_text(angle=-90)) +
-  geom_tile(aes(y=doc_npi, x=pcp_npi, fill=rel_total)) +
-  scale_fill_gradient2(low="green", mid="white", high="red", midpoint = 1) +
-  labs(x=NULL, y=NULL, title=type)
-
-
 
