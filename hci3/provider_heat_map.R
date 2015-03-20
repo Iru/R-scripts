@@ -2,55 +2,77 @@ require(RPostgreSQL)
 require(data.table)
 require(ggplot2)
 
-# connect to database
-#con <- dbConnect(dbDriver("PostgreSQL"), dbname="analytics")
+if (!is.null(run.once)) {
+  # connect to database
+  con <- dbConnect(dbDriver("PostgreSQL"), dbname="analytics")
+  
+  # 
+  # Pull claim data from database. Convert to data.table form for ease of 
+  # manipulation. Convert strings to factors and shorten some names while we're at
+  # it
+  # 
+  claim.dt<-data.table(dbReadTable(con,c("hci3_staging", "episode_claim")), key="episode")
+  claim.dt[,c("dx_code"
+              , "px_code"
+              , "assignment_type"
+              , "type_pos_cd"
+              , "type",    "episode_acronym"
+              , "pcp_npi", "pcp_provider_npi"
+              , "doc_npi", "attributed_phys_npi"
+              , "fac_npi", "fac_prvdr_npi_num"
+              , "sup_npi", "spprt_prvdr_npi_num") :=
+             list(factor(dx_code)
+                  , factor(px_code)
+                  , factor(assignment_type)
+                  , factor(type_pos_cd)
+                  , factor(episode_acronym), NULL
+                  , factor(pcp_provider_npi), NULL
+                  , factor(attributed_phys_npi), NULL
+                  , factor(fac_prvdr_npi_num), NULL
+                  , factor(spprt_prvdr_npi_num), NULL
+             )]
+  
+  # 
+  # Pull the code table from the database. Convert to data.table form for ease of 
+  # manipulation. Convert strings to factors
+  # 
+  code.table.dt <- data.table(dbReadTable(con,c("hci3_staging", "code_type")))
+  code.table.dt[,c("code_id"
+                   , "type_id"
+                   , "group_id"
+                   , "code_name"
+                   , "group_name"
+                   , "specific_type_id") :=
+                  list(factor(code_id)
+                       , factor(type_id)
+                       , factor(group_id)
+                       , factor(code_name)
+                       , factor(group_name)
+                       , NULL
+                  )]
+  run.once<-NULL
+}
+setkey(code.table.dt, type_id)
+dx.code.dt<-code.table.dt["DX"]
+rx.code.dt<-code.table.dt["RX"]
+px.code.dt<-code.table.dt[type_id!="DX" & type_id!="RX"]
 
-# Pull raw data from database and convert strings to factors
-#raw <- dbReadTable(con,c("hci3_staging", "episode_claim"))
-raw$episode_acronym <- as.factor(raw$episode_acronym)
-raw$attributed_phys_npi <- as.factor(raw$attributed_phys_npi)
-raw$pcp_provider_npi <- as.factor(raw$pcp_provider_npi)
-raw$fac_prvdr_npi_num <- as.factor(raw$fac_prvdr_npi_num)
-raw$spprt_prvdr_npi_num <- as.factor(raw$spprt_prvdr_npi_num)
-raw$dx_code <- as.factor(raw$dx_code)
-raw$px_code <- as.factor(raw$px_code)
-raw$assignment_type <- as.factor(raw$assignment_type)
-raw$type_pos_cd <- as.factor(raw$type_pos_cd)
-
-# ct <- dbReadTable(con,c("hci3_staging", "code_type"))
-# ct$code_id <- as.factor(ct$code_id)
-# ct$type_id <- as.factor(ct$type_id)
-# ct$group_id <- as.factor(ct$group_id)
-# ct$code_name <- as.factor(ct$code_name)
-# ct$group_name <- as.factor(ct$group_name)
-
-# Convert to data.table form for ease of manipulation.  Shorten some names while we're at it
-claim.dt<-data.table(raw, key="episode")
-claim.dt[,c("type",    "episode_acronym",
-            "pcp_npi", "pcp_provider_npi",
-            "doc_npi", "attributed_phys_npi",
-            "fac_npi", "fac_prvdr_npi_num",
-            "sup_npi", "spprt_prvdr_npi_num"):=list(episode_acronym, NULL,
-                                                    pcp_provider_npi, NULL,
-                                                    attributed_phys_npi, NULL,
-                                                    fac_prvdr_npi_num, NULL,
-                                                    spprt_prvdr_npi_num, NULL)]
 
 # First build facility & support only tables
 facility.dt<-claim.dt[!is.na(fac_npi),
                       .(type
                         , doc_npi
                         , pcp_npi
-                        , fac_total=sum(tot_amt)
-                        , fac_covrd=sum(cvrd_amt)                                 
+                        , total.fac=sum(tot_amt)
+                        , covrd.fac=sum(cvrd_amt)                                 
                       ), by="episode,fac_npi"]
 
 support.dt<-claim.dt[!is.na(sup_npi),
                      .(type
                        , doc_npi
                        , pcp_npi
-                       , sup_total=sum(tot_amt)
-                       , sup_covrd=sum(cvrd_amt)                                 
+                       , total.sup=sum(tot_amt)
+                       , covrd.sup=sum(cvrd_amt)                                 
                      ), by="episode,sup_npi"]
 
 # create episode level view - will need more of these that show dx/px groups later
@@ -64,27 +86,60 @@ episode.dt<-unique(claim.dt[,
 
 episode.dt<-merge(x=episode.dt
                   , y=facility.dt[,
-                               .(total.fac=sum(fac_total)
-                                 , covrd.fac=sum(fac_covrd)
+                               .(total.fac=sum(total.fac)
+                                 , covrd.fac=sum(covrd.fac)
                                ), by=episode]
                   , all.x=TRUE)
 episode.dt<-merge(x=episode.dt
                   , y=support.dt[,
-                               .(total.sup=sum(sup_total)
-                                 , covrd.sup=sum(sup_covrd)
+                               .(total.sup=sum(total.sup)
+                                 , covrd.sup=sum(covrd.sup)
                                ), by=episode]
                   , all.x=TRUE)
 
-means.dt<-data.table(
-  total.all=mean(episode.dt$total.all, na.rm=TRUE)
-  , covrd.all=mean(episode.dt$covrd.all, na.rm=TRUE)
-  , total.fac=mean(episode.dt$total.fac, na.rm=TRUE)
-  , covrd.fac=mean(episode.dt$covrd.fac, na.rm=TRUE)
-  , total.sup=mean(episode.dt$total.sup, na.rm=TRUE)
-  , covrd.sup=mean(episode.dt$covrd.sup, na.rm=TRUE)
-)
+means.dt<-rbindlist(list(
+  episode.dt[,
+             .(type=NA  
+               , total.all=mean(total.all, na.rm=TRUE)
+               , covrd.all=mean(covrd.all, na.rm=TRUE)
+               , total.fac=mean(total.fac, na.rm=TRUE)
+               , covrd.fac=mean(covrd.fac, na.rm=TRUE)
+               , total.sup=mean(total.sup, na.rm=TRUE)
+               , covrd.sup=mean(covrd.sup, na.rm=TRUE)
+               , cutoff=quantile(total.all, probs=0.8, type=8)
+             )],
+  episode.dt[,
+             .(total.all=mean(total.all, na.rm=TRUE)
+               , covrd.all=mean(covrd.all, na.rm=TRUE)
+               , total.fac=mean(total.fac, na.rm=TRUE)
+               , covrd.fac=mean(covrd.fac, na.rm=TRUE)
+               , total.sup=mean(total.sup, na.rm=TRUE)
+               , covrd.sup=mean(covrd.sup, na.rm=TRUE)
+               , cutoff=quantile(total.all, probs=0.8, type=8)
+             ), by=type]
+))
 
-#
+quantiles.dt<--rbindlist(list(
+    episode.dt[,
+               .(type=NA  
+                 , total.all=mean(total.all, na.rm=TRUE)
+                 , covrd.all=mean(covrd.all, na.rm=TRUE)
+                 , total.fac=mean(total.fac, na.rm=TRUE)
+                 , covrd.fac=mean(covrd.fac, na.rm=TRUE)
+                 , total.sup=mean(total.sup, na.rm=TRUE)
+                 , covrd.sup=mean(covrd.sup, na.rm=TRUE)
+               )],
+    episode.dt[,
+               .(total.all=mean(total.all, na.rm=TRUE)
+                 , covrd.all=mean(covrd.all, na.rm=TRUE)
+                 , total.fac=mean(total.fac, na.rm=TRUE)
+                 , covrd.fac=mean(covrd.fac, na.rm=TRUE)
+                 , total.sup=mean(total.sup, na.rm=TRUE)
+                 , covrd.sup=mean(covrd.sup, na.rm=TRUE)
+               ), by=type]
+  ))
+
+  #
 # Distributions of ALL costs
 #
 
@@ -172,8 +227,8 @@ pcp.doc.cond.dt<-setkey(epi.cond.dt[!is.na(pcp_npi) & !is.na(doc_npi),
                                     ), by="type,pcp_npi,doc_npi"],
                         type,pcp_npi,doc_npi)
 
-stop()
 
+if (do.extra) {
 #
 # Distribution of Facility costs
 #
@@ -242,6 +297,12 @@ doc.fac.cond.dt<-setkey(epi.cond.dt[!is.na(pcp_npi) & !is.na(doc_npi),
                                          , rel_covrd=mean(covrd)/avg_covrd
                                     ), by="type,pcp_npi,fac_npi"],
                         type,pcp_npi,fac_npi)
+}
+
+episode.g <- ggplot(data = episode.dt) + theme_minimal()
+episode.g + geom_density(aes(x=total.all)) + scale_x_log10() +
+  #facet_wrap(~type) +
+  labs(x="Episode Cost (log10)", y="Density")
 
                                                                                                                                                                                                 
 pcp.g <- ggplot(data=pcp.dt) + theme_minimal() + theme(axis.text.x=element_text(angle=-90))
