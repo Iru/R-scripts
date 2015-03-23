@@ -1,17 +1,78 @@
 require(RPostgreSQL)
 require(data.table)
-require(ggplot2)
 
 if (run.once) {
   # connect to database
-  con <- dbConnect(dbDriver("PostgreSQL"), dbname="analytics")
+  con <-
+    dbConnect(
+      dbDriver("PostgreSQL")
+      , dbname="analytics"
+    )
+  
+  # 
+  # Pull the code table from the database. Convert to data.table form for ease of 
+  # manipulation. Convert strings to factors
+  # 
+  code.table.dt <-
+    data.table(
+      dbReadTable(
+        con
+        ,c("hci3_staging", "code_type")
+      )
+      , key = "type_id")
+  dx.code.dt <-
+    setkey(
+      code.table.dt[type_id=="DX",
+                    .(code_id = factor(code_id)
+                      , group_id = factor(group_id)
+                      , code_name = factor(code_name)
+                      , group_name = factor(group_name)
+                    )]
+      , code_id)
+  rx.code.dt <-
+    setkey(
+      code.table.dt[type_id == "RX",
+                    .(code_id = factor(code_id)
+                      , group_id = factor(group_id)
+                      , code_name = factor(code_name)
+                      , group_name = factor(group_name)
+                    )]
+      , code_id)
+  px.code.dt <-
+    setkey(
+      code.table.dt[!(type_id == "DX" | type_id == "RX"),
+                    .(code_id = factor(code_id)
+                      , type_id = factor(type_id)
+                      , group_id = factor(group_id)
+                      , code_name = factor(code_name)
+                      , group_name = factor(group_name)
+                    )]
+      , code_id)
+  px.code.dt[,.(group_name=max(group_name), .N),keyby=.(group_id)]
+
+  # 
+  # Pull the complication data from the database. Convert to data.table form for ease of 
+  # manipulation. Convert strings to factors
+  # 
+  complication.code.dt <-
+    data.table(
+      dbReadTable(
+        con
+        ,c("hci3_staging", "episode_complication_code")
+      )
+      , key = "type_id")
   
   # 
   # Pull claim data from database. Convert to data.table form for ease of 
   # manipulation. Convert strings to factors and shorten some names while we're at
   # it
   # 
-  claim.dt<-data.table(dbReadTable(con,c("hci3_staging", "episode_claim")), key="episode")
+  claim.dt <-
+    data.table(
+      dbReadTable(con
+                  , c("hci3_staging", "episode_claim")
+                  )
+      , key="episode")
   claim.dt[,c("dx_code"
               , "px_code"
               , "assignment_type"
@@ -32,30 +93,8 @@ if (run.once) {
                   , factor(spprt_prvdr_npi_num), NULL
              )]
   
-  # 
-  # Pull the code table from the database. Convert to data.table form for ease of 
-  # manipulation. Convert strings to factors
-  # 
-  code.table.dt <- data.table(dbReadTable(con,c("hci3_staging", "code_type")))
-  code.table.dt[,c("code_id"
-                   , "type_id"
-                   , "group_id"
-                   , "code_name"
-                   , "group_name"
-                   , "specific_type_id") :=
-                  list(factor(code_id)
-                       , factor(type_id)
-                       , factor(group_id)
-                       , factor(code_name)
-                       , factor(group_name)
-                       , NULL
-                  )]
   run.once<-FALSE
 }
-setkey(code.table.dt, type_id)
-dx.code.dt <- code.table.dt["DX"]
-rx.code.dt <- code.table.dt["RX"]
-px.code.dt <- code.table.dt[type_id!="DX" & type_id!="RX"]
 
 
 # First build facility & support only tables
@@ -67,7 +106,13 @@ facility.dt <-
                , pcp_npi
                , total.fac=sum(tot_amt)
              ),
-             keyby=.(episode, fac_npi)],
+             keyby=.(fac_npi, episode)],
+  )
+facility.rev.dt <-
+  setkey(
+    facility.dt[,.(episode, fac_npi)]
+    , episode
+    , fac_npi
   )
 
 support.dt <-
@@ -78,7 +123,13 @@ support.dt <-
                , pcp_npi
                , total.sup=sum(tot_amt)
              ),
-             keyby=.(episode, sup_npi)],
+             keyby=.(sup_npi, episode)],
+  )
+support.rev.dt <-
+  setkey(
+    support.dt[,.(episode, sup_npi)]
+    , episode
+    , sup_npi
   )
 
 
@@ -95,10 +146,10 @@ episode.dt <-
     )
 
 # add the per episode facility total
-episode.dt<-facility.dt[, .(total.fac=sum(total.fac)), by=.(episode)][episode.dt]
+episode.dt<-facility.dt[, .(total.fac=sum(total.fac)), keyby=.(episode)][episode.dt]
 
 # add the per episode support total
-episode.dt<-support.dt[, .(total.sup=sum(total.sup)), by=.(episode)][episode.dt]
+episode.dt<-support.dt[, .(total.sup=sum(total.sup)), keyby=.(episode)][episode.dt]
 
 # Add the univeral and per condition means to each episode.  Also add the current cut-off value (80th percentile)
 episode.dt[,c("mean.all"
@@ -149,53 +200,55 @@ pcp.doc.list.dt <-
     ),
     pcp_npi, doc_npi)
 
-# fac.list.dt <-
-#   setkey(
-#     unique(
-#       episode.dt[!is.na(fac_npi) & total.all>=cutoff.all,
-#                  .(fac_npi)]
-#     ),
-#     fac_npi)
-# 
-# fac.pcp.list.dt <-
-#   setkey(
-#     unique(
-#       episode.dt[!is.na(fac_npi) & !is.na(pcp_npi) & total.all>=cutoff.all,
-#                  .(fac_npi, pcp_npi)]
-#     ),
-#     fac_npi, pcp_npi)
-# 
-# fac.doc.list.dt <-
-#   setkey(
-#     unique(
-#       episode.dt[!is.na(fac_npi) & !is.na(doc_npi) & total.all>=cutoff.all,
-#                  .(fac_npi, doc_npi)]
-#     ),
-#     fac_npi, doc_npi)
-# 
-# sup.list.dt <-
-#   setkey(
-#     unique(
-#       episode.dt[!is.na(sup_npi) & total.all>=cutoff.all,
-#                  .(sup_npi)]
-#     ),
-#     sup_npi)
-# 
-# sup.pcp.list.dt <-
-#   setkey(
-#     unique(
-#       episode.dt[!is.na(sup_npi) & !is.na(pcp_npi) & total.all>=cutoff.all,
-#                  .(sup_npi, pcp_npi)]
-#     ),
-#     sup_npi, pcp_npi)
-# 
-# sup.doc.list.dt <-
-#   setkey(
-#     unique(
-#       episode.dt[!is.na(sup_npi) & !is.na(doc_npi) & total.all>=cutoff.all,
-#                  .(sup_npi, doc_npi)]
-#     ),
-#     sup_npi, doc_npi)
+print("built episode based *.list.dts")
+
+fac.list.dt <-
+ setkey(
+   unique(
+     episode.dt[total.all>=cutoff.all,
+                .(episode)][facility.rev.dt,.(fac_npi)]
+   ),
+   fac_npi)
+
+fac.pcp.list.dt <-
+ setkey(
+    unique(
+      facility.dt[fac.list.dt & !is.na(pcp_npi),
+                 .(fac_npi, pcp_npi)]
+    ),
+    fac_npi, pcp_npi)
+
+fac.doc.list.dt <-
+  setkey(
+    unique(
+      episode.dt[!is.na(fac_npi) & !is.na(doc_npi) & total.all>=cutoff.all,
+                 .(fac_npi, doc_npi)]
+    ),
+    fac_npi, doc_npi)
+
+sup.list.dt <-
+  setkey(
+    unique(
+      episode.dt[!is.na(sup_npi) & total.all>=cutoff.all,
+                 .(sup_npi)]
+    ),
+    sup_npi)
+
+sup.pcp.list.dt <-
+  setkey(
+    unique(
+      episode.dt[!is.na(sup_npi) & !is.na(pcp_npi) & total.all>=cutoff.all,
+                 .(sup_npi, pcp_npi)]
+    ),
+    sup_npi, pcp_npi)
+
+sup.doc.list.dt <-
+  setkey(
+    unique(
+      episode.dt[!is.na(sup_npi) & !is.na(doc_npi) & total.all>=cutoff.all,
+                 .(sup_npi, doc_npi)]
+    ),
+    sup_npi, doc_npi)
 
 
 print("built *.list.dt")

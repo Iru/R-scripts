@@ -2,6 +2,7 @@
 #
 # Libraries... just in case
 #
+require(reshape2)
 require(data.table)
 require(ggplot2)
 
@@ -25,6 +26,8 @@ doc.type.dt$doc_npi <-
   reorder(doc.type.dt$doc_npi
           , -doc.type.dt$doc.relative.all
           , order=TRUE)
+
+print("reordered factors")
 
 #
 #  Here be graphs!!!!
@@ -72,7 +75,7 @@ pcp.type.g <-
              , group=variable
              , color=variable)) +
   theme_minimal() +
-  theme(axis.text.x=element_text(angle=-90)) +
+  theme(axis.text.x=element_blank()) +
   labs(x="PCP", y="Relative cost / Episode") +
   geom_point() +
   scale_colour_discrete() +
@@ -91,42 +94,44 @@ doc.g <-
         , y=value
         , group=variable
         , color=variable)) +
-  theme_minimal() +
   theme(axis.text.x=element_text(angle=-90)) +
   labs(x="doc", y="Relative cost / Episode") +
   scale_colour_discrete() +
   geom_point()
 
+doc.g + theme_minimal()
+
+#
+# PCP cost performance: by episode type
+#
 doc.type.g <-
   ggplot(melt(doc.type.dt
               , c("doc_npi", "type")
-              , c("relative.all", "relative.fac", "relative.sup")
+              , c("relative.all", "relative.fac", "relative.sup", "doc.relative.all")
               , na.rm = TRUE),
          aes(x=doc_npi
              , y=value
              , group=variable
              , color=variable)) +
-  theme_minimal() +
-  theme(axis.text.x=element_text(angle=-90)) +
+  theme(axis.text.x=element_blank()) +
   labs(x="doc", y="Relative cost / Episode") +
   geom_point() +
   scale_colour_discrete() +
   facet_wrap(~type)
 
+doc.type.g + theme_minimal()
 
-fac.g <- ggplot(data=fac.dt) + theme_minimal() + theme(axis.text.x=element_text(angle=-90))
-fac.g + geom_bar(aes(x=reorder(fac_npi, -avg_total), y=avg_total), stat="identity") +
-  labs(x="Facility", y="Avg. Episode $")
 
-pcp.doc.g <- ggplot(data=pcp.doc.dt) + theme_minimal() + theme(axis.text.x=element_text(angle=-90))
-pcp.doc.g + geom_tile(aes(y=doc_npi, x=pcp_npi, fill=rel_total)) +
+pcp.doc.g <-
+  ggplot(data=pcp.doc.dt,
+         aes(y=reorder(doc_npi, -relative.all)
+             , x=reorder(pcp_npi, -relative.all)
+             , fill=relative.all)) +
+  theme(axis.text.x=element_text(angle=-90)) +
+  geom_tile() +
   scale_fill_gradient2(low="green", mid="white", high="red", midpoint = 1) +
   labs(x=NULL, y=NULL)
 
+pcp.doc.g + theme_minimal() + theme(axis.text.x=element_text(angle=-90))
 
-pcp.doc.cond.g[[1]] +
-  theme_minimal() +
-  theme(axis.text.x=element_text(angle=-90)) +
-  geom_tile(aes(y=doc_npi, x=pcp_npi, fill=rel_total)) +
-  scale_fill_gradient2(low="green", mid="white", high="red", midpoint = 1) +
-  labs(x=NULL, y=NULL, title=type)
+
